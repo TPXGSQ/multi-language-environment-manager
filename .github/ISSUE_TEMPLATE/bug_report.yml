@@ -1,0 +1,76 @@
+name: 缺陷报告
+description: 检测结果不对、界面异常、切换失效等问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量填写完整，信息越全定位越快。
+        > 本项目由 AI 辅助完成，你的反馈会由维护者人工复核。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 点了哪里、期望什么、实际什么
+      placeholder: 在「语言与解释器」页选中 MSVC，版本显示为 2.0，实际应为 19.29.30153
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开程序
+        2. 点击左侧「语言与解释器」
+        3. 选中 MSVC
+        4. 观察到版本号错误
+    validations:
+      required: true
+
+  - type: dropdown
+    id: run-mode
+    attributes:
+      label: 运行方式
+      options:
+        - 免安装 exe（dist 目录）
+        - 启动.bat
+        - java -jar langmgr.jar
+    validations:
+      required: true
+
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      description: 运行 winver 查看
+      placeholder: Windows 10 19045
+    validations:
+      required: true
+
+  - type: input
+    id: java-version
+    attributes:
+      label: Java 版本
+      description: 若用免安装 exe 运行，填「内置即可」
+      placeholder: 21.0.2
+
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告
+      description: |
+        强烈建议附上「诊断报告」页导出的报告文件内容。
+        操作：诊断报告页 → 导出 → 把生成文件的内容粘贴到这里。
+        报告不含任何密钥，只有语言版本与路径信息。
+      render: markdown
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图 / 日志
+      description: 直接拖拽图片或粘贴报错文本
+    validations:
+      required: false

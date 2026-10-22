@@ -1,5 +1,23 @@
+# 编译产物
 out/
+*.class
+
+# 运行时生成的数据（每台机器不同，不入库）
 backup/
 reports/
+
+# 打包中间产物
 sources.txt
-*.class
+exe-input/
+
+# IDE / 编辑器
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+desktop.ini

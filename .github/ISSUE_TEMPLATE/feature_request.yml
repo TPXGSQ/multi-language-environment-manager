@@ -1,0 +1,55 @@
+name: 功能建议
+description: 希望支持新的语言、新的能力，或改进现有体验
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提建议前请先搜索现有 Issue，避免重复。
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 建议类型
+      options:
+        - 新增语言 / 工具链检测
+        - 改进现有检测结果
+        - 版本切换相关
+        - 依赖管理相关
+        - 界面 / 交互改进
+        - 其它
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 描述痛点，而不是直接给方案——这样更容易找到更合适的做法
+      placeholder: 我同时装了 MSVC 2019 和 2022，但只显示一个，看不出用的是哪个工具集
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望怎么解决
+    validations:
+      required: false
+
+  - type: input
+    id: language
+    attributes:
+      label: 若为新增语言，请填写语言名与官方下载页
+      placeholder: Zig / https://ziglang.org/download/
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、相关命令输出等
+    validations:
+      required: false
