@@ -365,11 +365,15 @@ public class LanguagePanel extends JPanel {
         p.add(head, BorderLayout.NORTH);
 
         Object[][] rows = new Object[r.installs.size()][5];
+        // 版本由环境变量选择的语言（Java/Python 等）用"当前生效"；
+        // MSVC/C# 这类由安装器/宿主管理的语言用"PATH 命中·可直接调用"——
+        // 它确实是新终端会调用的那个文件，但不叫"生效版本"以免误导为可切换。
+        boolean envSelectable = r.spec.envSwitchable;
         for (int i = 0; i < r.installs.size(); i++) {
             Detected.Install in = r.installs.get(i);
             String status;
             if (in.active) {
-                status = "当前生效";            // 系统实际在用的
+                status = envSelectable ? "当前生效" : "PATH 命中·可直接调用";
             } else if (in.blocking) {
                 status = "转发器·拦截";        // 卡在 PATH 最前面、让切换失效的那条
             } else if (in.stale) {
@@ -773,10 +777,11 @@ public class LanguagePanel extends JPanel {
                                                      Detected.LangResult value, int index,
                                                      boolean isSelected, boolean cellHasFocus) {
             name.setText(value.spec.displayName);
+            Theme.autoTooltip(name);
             meta.setText(value.installed
                     ? DashboardPanel.shorten(value.activePath())
                     : "未检测到");
-            meta.setToolTipText(value.installed ? value.activePath() : null);
+            meta.setToolTipText(value.installed ? Theme.wrapTip(value.activePath()) : null);
             badges.removeAll();
             if (value.installed) {
                 badges.add(Theme.badge(value.activeVersion(), Theme.TEXT_MAIN, Theme.GRAY_BG));
@@ -832,6 +837,9 @@ public class LanguagePanel extends JPanel {
             } else {
                 setForeground(Theme.TEXT_MUTED);
             }
+            // 自定义渲染器绕过了 centerCells 的通用提示逻辑：状态列被列宽截断时
+            // （如"PATH 命中·可直接调用"），悬停必须给出全文，否则只能看到"…"
+            setToolTipText(Theme.cellTooltip(this, table, column));
             return this;
         }
     }

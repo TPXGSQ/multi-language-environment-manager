@@ -986,6 +986,20 @@ public final class DepInspector {
                 map.put("dotnet", Arrays.asList("dotnet add package <pkg>", "dotnet list package",
                         "dotnet restore", "dotnet list package --outdated", "dotnet nuget locals all --list"));
                 break;
+            case "csharp":
+                map.put("NuGet", Arrays.asList("nuget restore <solution.sln>", "nuget list <pkg>",
+                        "nuget install <pkg>", "nuget update <pkg>", "msbuild <proj>.csproj /t:Restore"));
+                map.put("编译", Arrays.asList("csc <file>.cs", "csc /target:exe <file>.cs",
+                        "csc /version", "msbuild <proj>.csproj /p:Configuration=Release"));
+                break;
+            case "msvc":
+                map.put("编译", Arrays.asList("cl <file>.cpp", "cl /std:c++17 <file>.cpp",
+                        "cl /EHsc /W4 <file>.cpp", "vcvars64.bat（进入开发者环境）"));
+                map.put("vcpkg", Arrays.asList("vcpkg list", "vcpkg install <pkg>",
+                        "vcpkg install <pkg>:x64-windows", "vcpkg remove <pkg>", "vcpkg search <pkg>"));
+                map.put("构建", Arrays.asList("msbuild <proj>.vcxproj /p:Configuration=Release",
+                        "cmake -G \"Visual Studio 16 2019\" ..", "cmake --build . --config Release"));
+                break;
             case "ruby":
                 map.put("gem", Arrays.asList("gem list --local", "gem install <pkg>", "gem update",
                         "gem cleanup", "bundle install", "bundle list"));

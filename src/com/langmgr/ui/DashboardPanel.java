@@ -208,7 +208,8 @@ public class DashboardPanel extends JPanel {
             left.add(d1);
             left.add(d2);
             // 检测范围提示：放进卡片内与副文一起左对齐（放在卡片外会被 BoxLayout 居中截断）
-            JLabel tip1 = new JLabel("支持检测 27 种语言/工具链：Java、Python、Node.js、Go、Rust、.NET、GCC 等。");
+            JLabel tip1 = new JLabel("支持检测 " + com.langmgr.core.LangSpec.all().size()
+                    + " 种语言/工具链：Java、Python、Node.js、Go、Rust、.NET、MSVC、C#、GCC 等。");
             tip1.setFont(Theme.F_TINY);
             tip1.setForeground(Theme.TEXT_MUTED);
             tip1.setAlignmentX(Component.LEFT_ALIGNMENT);
@@ -323,7 +324,7 @@ public class DashboardPanel extends JPanel {
         JLabel path = new JLabel(shorten(r.activePath()));
         path.setFont(Theme.F_TINY);
         path.setForeground(Theme.TEXT_MUTED);
-        path.setToolTipText(r.activePath());
+        path.setToolTipText(Theme.wrapTip(r.activePath()));
         path.setBorder(BorderFactory.createEmptyBorder(2, 0, 0, 0));
         left.add(path, BorderLayout.CENTER);
         row.add(left, BorderLayout.CENTER);
@@ -608,6 +609,7 @@ public class DashboardPanel extends JPanel {
         t.setFont(Theme.F_H3);
         t.setForeground(fg);
         t.setAlignmentX(Component.LEFT_ALIGNMENT);
+        Theme.autoTooltip(t);
         left.add(t);
         if (detail != null) {
             detail.setAlignmentX(Component.LEFT_ALIGNMENT);

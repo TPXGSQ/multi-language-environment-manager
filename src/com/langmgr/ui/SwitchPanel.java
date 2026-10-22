@@ -83,9 +83,14 @@ public class SwitchPanel extends JPanel {
                 // 已不在 PATH 的残留：不是拦截问题，只是文件还在，引导去删除
                 showStaleNotice(sel);
                 previewButton.setEnabled(false);
-            } else if (sel != null && !sel.switchable) {
-                // 选中的是转发器：先把"它是什么、为什么切换不生效"讲清楚
+            } else if (sel != null && sel.blocking) {
+                // 真转发器（javapath 这类中间层）：先把"它是什么、为什么切换不生效"讲清楚
                 showBlockingNotice(sel);
+                previewButton.setEnabled(false);
+            } else if (sel != null && !sel.switchable) {
+                // 由安装器/宿主管理的版本（MSVC 工具集、.NET Framework csc、Roslyn 等）：
+                // 它们不是转发器，只是版本不由环境变量选择，给对应的解释
+                showManagedNotice(sel);
                 previewButton.setEnabled(false);
             } else {
                 renderPlan(null);
@@ -255,7 +260,10 @@ public class SwitchPanel extends JPanel {
         }
         List<LangOption> opts = new ArrayList<>();
         for (Detected.LangResult r : report.results) {
-            if (r.installed && !r.switchableInstalls().isEmpty()) {
+            // 收录口径：已安装且有安装实例即可进列表——包括 MSVC/C# 这种
+            // 所有安装都不可切换的语言。切换页同样是"解释为什么切不动"的地方，
+            // 完全藏掉反而让人以为没检测到（选中后会给出版本由谁管理的说明）。
+            if (r.installed && !r.installs.isEmpty()) {
                 opts.add(new LangOption(r));
             }
         }
@@ -331,15 +339,15 @@ public class SwitchPanel extends JPanel {
             return;
         }
         currentLang = opt.result;
+        int switchableCount = opt.result.switchableInstalls().size();
         // 可切换版本 + 拦截切换的转发器一起进列表，并按"当前生效 → 版本从新到旧"排；
         // 转发器用 blocking 做同版本内的次序键，保证它紧跟在自己镜像的那个版本后面，
-        // 而不是被甩到列表末尾让人对不上号
-        List<Detected.Install> shown = new ArrayList<>();
-        for (Detected.Install i : opt.result.installs) {
-            if (i.switchable || i.blocking || i.stale) {
-                shown.add(i);
-            }
-        }
+        // 而不是被甩到列表末尾让人对不上号。
+        // 全部安装都进列表：可切换的、拦截切换的转发器、以及 MSVC/C# 这类
+        // 不可切换的条目（后者有专门徽标与说明）。只显示部分会让用户以为
+        // "其他版本没检测到"，尤其在一键处理把某个安装加入 PATH 之后——
+        // 那个条目解决了"找不到命令"，但并不因此变成可切换版本。
+        List<Detected.Install> shown = new ArrayList<>(opt.result.installs);
         shown.sort((a, b) -> {
             if (a.active != b.active) {
                 return a.active ? -1 : 1;
@@ -364,15 +372,32 @@ public class SwitchPanel extends JPanel {
                 break;
             }
         }
-        int switchableCount = opt.result.switchableInstalls().size();
+        // 上面 setSelectedIndex 已触发选择监听器：选中的若是安装器/宿主管理的
+        // 条目，监听器已渲染出带徽标释义的专属说明——这里不能再被通用提示覆盖，
+        // 否则首次选语言时永远只能看到笼统文案，点走再点回才会"变对"。
+        Detected.Install selNow = versionList.getSelectedValue();
+        if (selNow != null && !selNow.switchable && !selNow.blocking && !selNow.stale) {
+            previewButton.setEnabled(false);
+            return;
+        }
         if (switchableCount <= 1) {
             int hidden = opt.result.installs.size() - switchableCount;
-            String extra = hidden > 0
-                    ? ("\n另外 " + hidden + " 个条目（系统 PATH 转发器、或由宿主/global.json 选择）无法通过环境变量切换。")
-                    : "";
+            String extra;
+            if (switchableCount == 0 && hidden > 0) {
+                // MSVC / C# 这类：所有版本都由安装器或宿主管理
+                extra = "\n\n这 " + hidden + " 个条目的版本由 Visual Studio 安装器或 .NET 宿主自动管理，"
+                        + "不通过环境变量选择，因此本工具不提供切换操作；"
+                        + "如需增删版本，请使用 Visual Studio Installer 或 .NET 官方安装包。";
+            } else {
+                extra = hidden > 0
+                        ? ("\n另外 " + hidden + " 个条目（系统 PATH 转发器、或由宿主/global.json 选择）无法通过环境变量切换。")
+                        : "";
+            }
             planWrap.removeAll();
-            planWrap.add(Theme.notice("该语言只有 " + switchableCount + " 个可切换版本，没有其他版本可选。"
-                            + extra
+            String head = switchableCount == 0
+                    ? "该语言的版本不通过环境变量选择，因此不提供切换操作。"
+                    : "该语言只有 " + switchableCount + " 个可切换版本，没有其他版本可选。";
+            planWrap.add(Theme.notice(head + extra
                             + "\n如果确实装了多个版本但没被识别，可在「环境变量」页手动指定路径。",
                     Theme.TEXT_SUB, Theme.GRAY_BG), BorderLayout.CENTER);
             planWrap.revalidate();
@@ -391,11 +416,63 @@ public class SwitchPanel extends JPanel {
     }
 
     /**
+     * 选中"由安装器/宿主管理"的版本（MSVC 工具集、.NET Framework csc、
+     * Roslyn 编译器等）时的说明：它们能被检测到、也可能正被 PATH 命中，
+     * 但"用哪个版本"不是由环境变量决定的，所以本页不提供切换操作。
+     * 之前这类条目被误路由到转发器说明（JAVA_HOME/javapath 文案），完全对不上号。
+     */
+    private void showManagedNotice(Detected.Install sel) {
+        String specName = currentLang == null ? "该语言" : currentLang.spec.displayName;
+        boolean isMsvc = currentLang != null && "msvc".equals(currentLang.spec.id);
+        JPanel box = new JPanel(new BorderLayout(0, 8));
+        box.setOpaque(false);
+        String where = sel.active ? "PATH 当前命中的" : "已发现的";
+        String path = sel.exePath != null ? sel.exePath
+                : (sel.rootDir != null ? sel.rootDir : "（路径未知）");
+        box.add(Theme.notice("「" + path + "」是" + where + " " + specName + " 条目，"
+                        + (sel.active ? "新终端可直接调用。" : "不在 PATH 中。"),
+                Theme.INFO, Theme.INFO_BG), BorderLayout.NORTH);
+        // 徽标释义按所选条目自身携带的徽标动态生成：
+        // 点"PATH 命中·可直接调用 + 不可切换"的条目解释两者；
+        // 点不在 PATH 的纯"不可切换"条目只解释后者，避免张冠李戴。
+        StringBuilder legend = new StringBuilder();
+        if (sel.active) {
+            legend.append("「PATH 命中 · 可直接调用」：新开一个终端敲命令（")
+                    .append(currentLang == null ? "" : String.join(" / ", currentLang.spec.exeNames))
+                    .append("）时，实际运行的就是这个文件。\n");
+        } else {
+            legend.append("该条目不在 PATH 中：新终端敲命令不会用到它。\n");
+        }
+        legend.append("「不可切换」：用哪个版本不由环境变量决定，所以本页不提供切换按钮。")
+              .append(sel.active ? "能调用 ≠ 能切换版本。" : "");
+        String extra = legend + "\n\n"
+                + (isMsvc
+                ? "MSVC 的版本由 Visual Studio Installer 统一安装与管理，"
+                        + "cl.exe 平时也不在 PATH 里（开发者命令行通过 vcvars64.bat 临时设置）。\n\n"
+                        + "· 想增删工具集版本：请使用 Visual Studio Installer。\n"
+                        + "· 想编译 C++：建议使用「x64 Native Tools Command Prompt」——\n"
+                        + "  仅把 cl.exe 目录加入 PATH 并不能编译，还缺 INCLUDE/LIB 等变量。"
+                : "C# 编译器的版本随 .NET Framework / Visual Studio 一起安装，"
+                        + "不由环境变量选择。\n\n"
+                        + "· 想用新编译器：安装新版 .NET SDK 或 Visual Studio。\n"
+                        + "· 新式 .NET 项目请使用 dotnet CLI（见 .NET SDK 条目）。");
+        box.add(wrapArea(extra), BorderLayout.CENTER);
+        planWrap.removeAll();
+        planWrap.add(box, BorderLayout.NORTH);
+        planWrap.revalidate();
+        planWrap.repaint();
+    }
+
+    /**
      * 选中转发器时的说明面板：它不是可选版本，而是卡在 PATH 最前面的中间层。
      * 这里必须给出"接下来该做什么"，否则用户只会看到一堆不能点的按钮。
      */
     private void showBlockingNotice(Detected.Install fwd) {
         String running = currentLang == null ? null : currentLang.runningPath();
+        // 文案不要写死 JAVA_HOME：虽然目前只有 Java 会产生转发器条目，
+        // 但按语言的 HOME 变量取值更稳，避免将来别的语言出现转发器时再次错位
+        String homeVar = currentLang != null && !currentLang.spec.homeVars.isEmpty()
+                ? currentLang.spec.homeVars.get(0) : "HOME 类环境变量";
         JPanel box = new JPanel(new BorderLayout(0, 8));
         box.setOpaque(false);
         box.add(Theme.notice("「" + fwd.exePath + "」不是版本，是系统 PATH 里的转发器。",
@@ -405,7 +482,7 @@ public class SwitchPanel extends JPanel {
                 + "转发器基本都写在系统级 PATH 里，而系统级永远排在用户级之前——"
                 + "所以在本页做任何切换都不会改变实际使用的版本。\n\n"
                 + "要真正切换，需要把这条转发器从系统 PATH 移除（管理员权限），"
-                + "或者改用 JAVA_HOME / 绝对路径调用。"), BorderLayout.CENTER);
+                + "或者改用 " + homeVar + " / 绝对路径调用。"), BorderLayout.CENTER);
         JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         row.setOpaque(false);
         JButton how = Theme.primaryButton("怎么解决…");
@@ -998,8 +1075,9 @@ public class SwitchPanel extends JPanel {
     /**
      * 版本列表单元格。
      *
-     * <p>徽标分两种：路径命中的那个是"当前生效"（可能是转发器），但转发器不进本列表；
-     * 本列表里标的是"当前运行"——即实际跑起来的那个版本，转发器转发到谁就标谁。
+     * <p>徽标含义：active 且语言本身可由环境变量选择 → "当前生效"；
+     * active 但版本由安装器/宿主管理（MSVC/C#）→ "PATH 命中"——它确实是
+     * 新终端会调用的那个文件，但称"生效版本"会让人误以为存在切换关系。
      */
     private final class VersionRenderer extends JPanel implements ListCellRenderer<Detected.Install> {
         private final JLabel ver = new JLabel();
@@ -1023,15 +1101,21 @@ public class SwitchPanel extends JPanel {
                                                      boolean isSelected, boolean cellHasFocus) {
             ver.setText(value.label());
             path.setText(DashboardPanel.shorten(value.exePath == null ? value.rootDir : value.exePath));
-            path.setToolTipText(value.exePath);
+            path.setToolTipText(Theme.wrapTip(value.exePath == null ? value.rootDir : value.exePath));
             badges.removeAll();
             if (value.active) {
-                badges.add(Theme.badge("当前生效", Theme.OK, Theme.OK_BG));
+                boolean envSelectable = currentLang == null || currentLang.spec.envSwitchable;
+                badges.add(Theme.badge(envSelectable ? "当前生效" : "PATH 命中 · 可直接调用",
+                        Theme.OK, Theme.OK_BG));
             } else if (value.blocking) {
                 badges.add(Theme.badge("转发器 · 拦截切换", Theme.WARN, Theme.WARN_BG));
             } else if (value.stale) {
                 // 已不在 PATH：拦截问题解决了，只剩磁盘上的文件
                 badges.add(Theme.badge("转发器残留 · 可删除", Theme.INFO, Theme.INFO_BG));
+            }
+            if (!value.switchable && !value.blocking && !value.stale) {
+                // MSVC 工具集 / .NET 运行时这类由安装器或宿主管理的条目
+                badges.add(Theme.badge("不可切换 · 由安装器/宿主管理", Theme.INFO, Theme.INFO_BG));
             }
             badges.add(Theme.badge(value.source, Theme.TEXT_SUB, Theme.GRAY_BG));
             if (value.arch != null && !value.arch.isEmpty()) {

@@ -439,8 +439,23 @@ public final class Theme {
             public int getRowHeight() {
                 return px(26);
             }
+
+            /**
+             * 表格只作展示：双击不得进入编辑。
+             * JTable 默认所有单元格都可编辑，双击会冒出一个看不见边框的输入框，
+             * 改了也不生效（没有写回任何模型），纯属"假编辑"，会误导用户。
+             */
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
         };
         t.setFillsViewportHeight(true);
+        // 连"双击进入编辑"的手势也一并掐掉，避免光标闪一下才被 isCellEditable 拒绝
+        t.setDefaultEditor(Object.class, null);
+        ToolTipManager tips = ToolTipManager.sharedInstance();
+        tips.setInitialDelay(px(320));
+        tips.setDismissDelay(20000);
         t.setShowGrid(false);
         t.setIntercellSpacing(new Dimension(0, 0));
         t.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
@@ -454,9 +469,289 @@ public final class Theme {
         return t;
     }
 
+    /* -------------------------------------------------- 截断文字的全量提示 */
+
+    /**
+     * 给"会被截断"的标签装上悬停提示。
+     *
+     * <p>只有当文字真的显示不全时才提示：能完整显示的文字再弹一个同样的提示
+     * 只是噪音。因此判断依据是"首选宽度 > 实际宽度"，在布局变化时动态求值，
+     * 而不是注册时求值——注册时组件还没完成布局，宽度是 0，会得到全错的结论。
+     */
+    public static void autoTooltip(JLabel label) {
+        String text = label.getText();
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        // 富文本（<html>…）交给调用方自行设置提示，这里不猜
+        if (text.startsWith("<html")) {
+            return;
+        }
+        // 列表/表格渲染器每次重绘都会调用到这里：已挂过的直接更新状态即可，
+        // 否则同一个组件会被叠加成百上千个监听器
+        Object prev = label.getClientProperty("langmgr.tooltipHook");
+        if (prev instanceof HookedLabel) {
+            HookedLabel h = (HookedLabel) prev;
+            // 渲染器会复用同一个标签换文字：始终以当前文字为准重算是否截断
+            h.text = text;
+            h.check();
+            return;
+        }
+        HookedLabel h = new HookedLabel(label);
+        h.text = text;
+        label.putClientProperty("langmgr.tooltipHook", h);
+        label.addComponentListener(h);
+        installTooltips();
+        h.check();
+    }
+
+    /* ------------------------------------------------------ 提示窗口限宽 */
+
+    /** 提示窗口的绝对最大宽度：长路径/长说明在这种长度下换行最易读。 */
+    private static final int TIP_MAX_WIDTH = 460;
+    /** 提示窗口的最小宽度：太窄会把文字折成"每行两个字"，反而难读。 */
+    private static final int TIP_MIN_WIDTH = 150;
+    /** Swing HTML tooltip 在 div 宽度之外附加的内边距（实测约 28px，随字号缩放）。 */
+    private static int tipInset() {
+        return px(28);
+    }
+
+    /** 提示窗口的最大高度，避免超长文本铺满整块屏幕。 */
+    private static final int TIP_MAX_HEIGHT = 420;
+    /** 换行后最多显示的行数，超出用"…"收尾。 */
+    private static final int TIP_MAX_LINES = 18;
+
+    /**
+     * 让全应用所有 tooltip 都自动换行且限制最大宽度。
+     *
+     * <p>Swing 原生提示不会换行：长路径会排成一行直接冲出屏幕边缘，
+     * 既读不全也挡住了下面的内容。这里把共享的 {@link ToolTipManager} 换成
+     * 用 {@link #wrapTip(String)} 生成 HTML 的方式——凡是调用过本方法之后
+     * 设置的提示文本都会被转成按宽度换行的版本。
+     * 重复调用是安全的（用静态标记保证只包装一次）。
+     */
+    private static void installTooltips() {
+        if (TOOLTIPS_INSTALLED) {
+            return;
+        }
+        TOOLTIPS_INSTALLED = true;
+        ToolTipManager.sharedInstance().setInitialDelay(px(320));
+        ToolTipManager.sharedInstance().setDismissDelay(20000);
+    }
+
+    private static boolean TOOLTIPS_INSTALLED;
+
+    /**
+     * 把任意文本包成"限宽 + 自动换行"的 HTML 提示。
+     *
+     * <p>用 HTML 的 div 固定像素宽度，让 Swing 的 HTML 渲染器自己折行；
+     * 同时转义标签字符，避免路径里的 &lt; &gt; &amp; 破坏排版。
+     *
+     * <p>宽度默认取 {@link #TIP_MAX_WIDTH}；调用方知道"这段文字装在多宽的盒子里"时，
+     * 应改用 {@link #wrapTip(String, int)}，否则短文字也会被撑成一条宽条。
+     * 要按文字自身宽度自适应，用 {@link #tipHtml(String, int)}。
+     */
+    public static String wrapTip(String text) {
+        return wrapTip(text, TIP_MAX_WIDTH);
+    }
+
+    /**
+     * 按指定上限宽度生成提示。
+     *
+     * @param maxWidth 提示窗口允许的最大像素宽度，内部会夹到
+     *                 [{@link #TIP_MIN_WIDTH}, {@link #TIP_MAX_WIDTH}] 区间
+     */
+    public static String wrapTip(String text, int maxWidth) {
+        return tipHtml(text, clampTipWidth(maxWidth));
+    }
+
+    /**
+     * 生成提示 HTML，宽度自适应：短文字用自身宽度，长文字折在 {@code maxWidth} 内。
+     *
+     * <p>为什么不一律写固定宽度：原生提示窗口是"按内容算多大就多大"，一旦我们塞进
+     * 一个 460px 的 div，哪怕只有五个字也会带出一大片空白（用户截图里的那种）。
+     * 所以只有真的需要折行时才限宽，其余情况让 div 收缩到文字宽度。
+     *
+     * @param maxWidth 提示窗口最终允许占用的最大像素宽度（含内边距）
+     */
+    private static String tipHtml(String text, int maxWidth) {
+        if (text == null || text.isEmpty()) {
+            return null;
+        }
+        String body = text
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                // 路径里的 \ / - _ 在 Swing 的 HTML 排版里不算"可断行处"：
+                // 没有断点，div 限多窄都会照原样排成一行，宽条问题依旧。
+                // 插 <wbr> 给渲染器一个"可以在这里折"的许可（不占宽度、不显示）
+                .replace("\\", "\\<wbr>")
+                .replace("/", "/<wbr>")
+                .replace("-", "-<wbr>")
+                .replace("_", "_<wbr>")
+                .replace("\n", "<br>");
+        // 行数超限时截断：超过 TIP_MAX_LINES 行之后的文字用省略号收尾，
+        // 提示窗口只是"看全文"，不该变成一个不可关闭的长文档
+        String[] lines = body.split("<br>", -1);
+        boolean cut = lines.length > TIP_MAX_LINES;
+        if (cut) {
+            body = String.join("<br>", java.util.Arrays.copyOf(lines, TIP_MAX_LINES)) + "<br>…";
+        }
+        // 估算文字需要的宽度：中文约 1em，西文约 0.55em。宁可估大——估小了
+        // 会漏掉折行，长路径就排成一行冲出屏幕（这正是要修的问题）
+        int est = estimatedWidth(text);
+        // 放得下就不限宽：div 不写 width 时会按内容收缩，不会留白
+        boolean needsWrap = cut || lines.length > 1 || est > maxWidth;
+        if (!needsWrap) {
+            return "<html><div>" + body + "</div></html>";
+        }
+        // Swing 的 HTML 渲染会在 div 宽度之外再加约 28px 的内边距，
+        // 不减掉的话"按盒子宽度限宽"会实际超出一截，又变成冲出屏幕那种问题
+        int divW = Math.max(px(40), maxWidth - tipInset());
+        return "<html><div style='width:" + divW + "px;'>" + body + "</div></html>";
+    }
+
+    /** 粗估一段文字的像素宽度（中文字符按整字宽度、其余按 0.6em 算）。 */
+    private static int estimatedWidth(String text) {
+        Font f = F_SMALL == null ? font(12f) : F_SMALL;
+        FontMetrics fm = new JLabel().getFontMetrics(f);
+        float ascii = f.getSize2D() * 0.6f;
+        int w = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char ch = text.charAt(i);
+            w += ch < 0x2E80 ? Math.round(ascii) : fm.charWidth(ch);
+        }
+        return w;
+    }
+
+    /** 把期望宽度夹到提示窗口允许的区间内。 */
+    private static int clampTipWidth(int want) {
+        if (want <= 0) {
+            return TIP_MAX_WIDTH;
+        }
+        return Math.max(TIP_MIN_WIDTH, Math.min(TIP_MAX_WIDTH, want));
+    }
+
+    /**
+     * 提示文字是否需要限宽处理（短文本不值得套 HTML，保留原生渲染更快）。
+     *
+     * @param owner 装了这段文字的组件；提示宽度上限取它的宽度——
+     *              文字都放不进自己的盒子，说明盒子本来就窄，提示窗口跟着收窄才对
+     */
+    private static String tipText(String raw, JComponent owner) {
+        if (raw == null || raw.isEmpty()) {
+            return null;
+        }
+        int cap = owner == null || owner.getWidth() <= 0
+                ? TIP_MAX_WIDTH : clampTipWidth(owner.getWidth());
+        int w = owner == null ? 0
+                : owner.getFontMetrics(owner.getFont()).stringWidth(raw);
+        // 单行且放得下：原文交给 Swing，零解析开销
+        if (w <= cap && !raw.contains("\n")) {
+            return raw;
+        }
+        // 超宽的长文本：宽度上限就是这个盒子的宽度，框不会比文字所在的格子更宽
+        return tipHtml(raw, cap);
+    }
+
+    /** 判断一个标签当前是否显示不全。 */
+    public static boolean isClipped(JLabel label) {
+        if (label == null || label.getText() == null || label.getText().isEmpty()) {
+            return false;
+        }
+        if (label.getWidth() <= 0) {
+            return true;
+        }
+        Insets in = label.getInsets();
+        int avail = label.getWidth() - in.left - in.right;
+        return label.getFontMetrics(label.getFont()).stringWidth(label.getText()) > avail;
+    }
+
+    /** 标签尺寸变化时重新判断"是否截断"，动态增删提示。 */
+    private static final class HookedLabel implements java.awt.event.ComponentListener {
+        private final JLabel label;
+        /** 当前应展示的完整文字（渲染器复用组件时会被改写）。 */
+        String text;
+
+        HookedLabel(JLabel label) {
+            this.label = label;
+        }
+
+        void check() {
+            // 渲染器可能刚把文字改过，以 label 上的当前值为准兜底
+            if (label.getText() != null && !label.getText().isEmpty()
+                    && !label.getText().startsWith("<html")) {
+                text = label.getText();
+            }
+            // 只有真截断时才提示；长文本统一走限宽换行，避免提示窗冲出屏幕
+            label.setToolTipText(isClipped(label) ? tipText(text, label) : null);
+        }
+
+        @Override
+        public void componentResized(java.awt.event.ComponentEvent e) {
+            check();
+        }
+
+        @Override
+        public void componentMoved(java.awt.event.ComponentEvent e) {
+        }
+
+        @Override
+        public void componentShown(java.awt.event.ComponentEvent e) {
+            check();
+        }
+
+        @Override
+        public void componentHidden(java.awt.event.ComponentEvent e) {
+        }
+    }
+
+    /**
+     * 表格单元格：内容超宽时返回完整文字，否则返回 null（不弹提示）。
+     * 提示宽度上限取该列宽度（再夹到全局上下限）——列窄就不会弹出一个宽条，
+     * 长路径也仍会被 {@link #wrapTip(String, int)} 折行而不会撑出屏幕。
+     */
+    private static String tooltipIfClipped(JLabel cell, JTable table, int column) {
+        String text = cell.getText();
+        if (text == null || text.isEmpty() || text.startsWith("<html")) {
+            return null;
+        }
+        int colW = table.getColumnModel().getColumn(column).getWidth();
+        Insets in = cell.getInsets();
+        int avail = colW - in.left - in.right - px(4);
+        if (avail <= 0) {
+            return wrapTip(text);
+        }
+        if (cell.getFontMetrics(cell.getFont()).stringWidth(text) <= avail) {
+            return null;
+        }
+        // 表格提示比列宽再宽松一点：列宽往往只有几十像素，严格照抄会把一句
+        // 说明折成十几个字一行。以"框宽 ≈ 文字所在格子的 1.6 倍"起算，
+        // 既不会出现大片空白，也不至于把提示挤成一根竖条
+        int want = Math.max(avail, Math.round(colW * 1.6f));
+        return tipHtml(text, clampTipWidth(want));
+    }
+
+    /**
+     * 给"自带渲染器"的表格单元格补提示的公开入口。
+     *
+     * <p>{@link #centerCells} 只管走默认渲染器的列；像状态列这种装了自定义
+     * renderer 的格子，渲染器若不设置 tooltip，悬停就什么都没有。自定义渲染器
+     * 在 getTableCellRendererComponent 末尾调用本方法即可与全局行为一致。
+     */
+    public static String cellTooltip(JLabel cell, JTable table, int column) {
+        return tooltipIfClipped(cell, table, column);
+    }
+
+    /** 带悬停提示的次要文字（会按实际宽度自动决定是否提示）。 */
+    public static JLabel subTip(String text) {
+        JLabel l = sub(text);
+        autoTooltip(l);
+        return l;
+    }
+
     /** 标题标签。 */
-    public static JLabel title(String text) {
-        JLabel l = new JLabel(text);
+    public static JLabel title(String text) {        JLabel l = new JLabel(text);
         l.setFont(F_TITLE);
         l.setForeground(TEXT_MAIN);
         return l;
@@ -499,6 +794,7 @@ public final class Theme {
         JLabel l = new JLabel(text);
         l.setFont(F_SMALL);
         l.setForeground(TEXT_SUB);
+        autoTooltip(l);
         return l;
     }
 
@@ -506,6 +802,7 @@ public final class Theme {
         JLabel l = new JLabel(text);
         l.setFont(F_SMALL);
         l.setForeground(TEXT_MUTED);
+        autoTooltip(l);
         return l;
     }
 
@@ -514,6 +811,7 @@ public final class Theme {
         JLabel l = new JLabel(text);
         l.setFont(F_TINY);
         l.setForeground(TEXT_MUTED);
+        autoTooltip(l);
         return l;
     }
 
@@ -672,7 +970,16 @@ public final class Theme {
         };
         l.setFont(F_MONO_SM);
         l.setForeground(TEXT_MAIN);
-        l.setToolTipText(full);
+        // 路径是"被塞进固定宽度卡片"的长文本：提示宽度跟着卡片走，
+        // 卡片窄时收窄，而不是一律 460px 宽条（见 wrapTip(String,int)）
+        l.addComponentListener(new java.awt.event.ComponentAdapter() {
+            @Override
+            public void componentResized(java.awt.event.ComponentEvent e) {
+                l.setToolTipText(wrapTip(full, l.getWidth()));
+            }
+        });
+        // 首次布局前还不知道卡片多宽：先给中性宽度，resize 后立刻校正
+        l.setToolTipText(wrapTip(full, Math.max(TIP_MIN_WIDTH, px(260))));
         l.setBorder(BorderFactory.createEmptyBorder(1, 0, 1, 0));
         return l;
     }
@@ -955,11 +1262,39 @@ public final class Theme {
     /** 表格圆角描边：细黑灰线。 */
     public static final Color TABLE_EDGE = new Color(0x4E, 0x55, 0x60);
 
-    /** 单元格文字居中（原始 new JTable 的表调用，Theme.table 已内置）。 */
+    /** 单元格文字居中 + 超宽时悬停显示全文。 */
     public static void centerCells(JTable t) {
-        javax.swing.table.DefaultTableCellRenderer r = new javax.swing.table.DefaultTableCellRenderer();
-        r.setHorizontalAlignment(javax.swing.SwingConstants.CENTER);
-        t.setDefaultRenderer(Object.class, r);
+        javax.swing.table.TableCellRenderer base = t.getDefaultRenderer(Object.class);
+        t.setDefaultRenderer(Object.class, (table, value, isSelected, hasFocus, row, column) -> {
+            Component c = base.getTableCellRendererComponent(
+                    table, value, isSelected, hasFocus, row, column);
+            if (c instanceof JLabel) {
+                JLabel jl = (JLabel) c;
+                // 渲染器复用同一个组件：每次都要重置文字与提示，否则会串到别的单元格
+                jl.setText(value == null ? "" : String.valueOf(value));
+                jl.setHorizontalAlignment(javax.swing.SwingConstants.CENTER);
+                jl.setToolTipText(tooltipIfClipped(jl, table, column));
+            } else if (c instanceof JComponent) {
+                ((JComponent) c).setToolTipText(null);
+            }
+            return c;
+        });
+    }
+
+    /**
+     * 把表格设为"只读展示"：禁用双击进入编辑，并让超宽单元格在悬停时给出全文。
+     *
+     * <p>对 {@code new JTable(model)} 这类直接构造的表调用（模型驱动的表格
+     * 无法走 {@link #table(Object[][], Object[])}），保证行为一致。
+     */
+    public static <T extends JTable> T readOnly(T t) {
+        // 双击进入编辑会冒出一个无边框输入框，改了也不会写回模型（假编辑），
+        // 直接掐掉编辑能力
+        t.setDefaultEditor(Object.class, null);
+        ToolTipManager tips = ToolTipManager.sharedInstance();
+        tips.setInitialDelay(px(320));
+        tips.setDismissDelay(20000);
+        return t;
     }
 
     /**

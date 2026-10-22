@@ -86,6 +86,13 @@ public final class LangSpec {
     public final List<PkgManager> pkgManagers;
     /** 该语言是否支持多版本共存检测（如 py launcher、conda env、sdkman）。 */
     public final boolean multiVersion;
+    /**
+     * 版本是否可以通过环境变量选择。
+     * MSVC / C# 编译器这类由安装器（Visual Studio Installer、.NET 安装包）管理的语言
+     * 应设为 false：即使把它们的目录加进 PATH（使命令可被调用），也不构成"版本切换"，
+     * 混进切换候选只会误导用户以为切了就能生效。
+     */
+    public final boolean envSwitchable;
     /** 一句话说明，用于界面提示。 */
     public final String hint;
     /**
@@ -105,6 +112,7 @@ public final class LangSpec {
         this.homeVars = Collections.unmodifiableList(b.homeVars);
         this.pkgManagers = Collections.unmodifiableList(b.pkgManagers);
         this.multiVersion = b.multiVersion;
+        this.envSwitchable = b.envSwitchable;
         this.hint = b.hint;
         this.downloads = Collections.unmodifiableMap(b.downloads);
     }
@@ -123,6 +131,7 @@ public final class LangSpec {
         private final List<PkgManager> pkgManagers = new ArrayList<>();
         private final Map<String, String> downloads = new LinkedHashMap<>();
         private boolean multiVersion = false;
+        private boolean envSwitchable = true;
         private String hint = "";
 
         Builder(String id, String displayName, String category) {
@@ -166,6 +175,12 @@ public final class LangSpec {
 
         public Builder multiVersion(boolean v) {
             multiVersion = v;
+            return this;
+        }
+
+        /** 声明该语言的版本不由环境变量选择（MSVC/C# 等），禁止进入切换候选。 */
+        public Builder envSwitchable(boolean v) {
+            envSwitchable = v;
             return this;
         }
 
@@ -361,23 +376,71 @@ public final class LangSpec {
                 // 不要用 gcc.*?([\d.]+)：MinGW 首行含 x86_64，会先抓到 "64"。
                 .probe("gcc\\s.*?\\b(\\d+\\.\\d+(?:\\.\\d+)?)", "gcc", "--version")
                 .probe("\\(GCC\\)\\s+(\\d+(?:\\.\\d+)+)", "gcc", "--version")
+                // 有的环境只装了 g++（gcc 前端缺失），单独给 g++ 一组探测命令
+                .probe("g\\+\\+\\s.*?\\b(\\d+\\.\\d+(?:\\.\\d+)?)", "g++", "--version")
+                .probe("\\(GCC\\)\\s+(\\d+(?:\\.\\d+)+)", "g++", "--version")
                 .exe("gcc", "g++", "cc")
                 .homeVar("MINGW_HOME", "MSYS_HOME")
                 .pkg(new PkgManager("cmake", "CMake",
                         Arrays.asList("cmake", "--version"), "cmake version ([\\d.]+)",
                         null, false, "CMakeLists.txt"))
-                .hint("Windows 上常见来源：MinGW-w64、MSYS2、TDM-GCC、WSL 内 gcc。")
+                .hint("Windows 上常见来源：MinGW-w64、MSYS2、TDM-GCC、WSL 内 gcc。"
+                        + "用 Visual Studio 装的 C++ 是 MSVC（cl.exe），见独立的 MSVC 条目。")
                 .download("GCC 官方发布页", "https://gcc.gnu.org/releases.html")
                 .download("MinGW-w64（WinLibs 构建，各版本）", "https://winlibs.com/")
                 .download("MSYS2", "https://www.msys2.org/")
                 .build());
 
+        register(LangSpec.builder("msvc", "MSVC (Visual Studio C/C++)", "编译型")
+                // cl 不带参数会打印用法说明，不能作为版本探测；/? 的首行横幅带真实版本号。
+                // 横幅随 VS 语言包本地化：
+                //   英文："Microsoft (R) C/C++ Optimizing Compiler Version 19.29.30155 for x64"
+                //   中文："Microsoft (R) C/C++ 优化编译器 19.29.30153 版"
+                // 因此正则锚定 "C/C++" 与其后 60 字符内的三段式版本号，中英文通吃。
+                // cl 命中失败也没关系——Scanner.discoverMsvc() 会通过 vswhere /
+                // 安装目录兜底发现，版本号直接取目录名。
+                .probe("C/C\\+\\+.{0,60}?(\\d+\\.\\d+\\.\\d+)", "cl", "/?")
+                .exe("cl")
+                .envSwitchable(false)
+                .pkg(new PkgManager("vcpkg", "vcpkg",
+                        Arrays.asList("vcpkg", "version"), "version ([\\w.\\-]+)",
+                        Arrays.asList("vcpkg", "list"), false, "vcpkg.json"))
+                .hint("随 Visual Studio / Build Tools 安装（cl.exe 默认不在 PATH，需 vcvars64.bat）；"
+                        + "本工具通过 vswhere 与安装目录直接发现，无需进入开发者命令行。")
+                .download("Visual Studio 下载页（含 Community）", "https://visualstudio.microsoft.com/zh-hans/downloads/")
+                .download("Visual Studio 2019 及更早版本", "https://visualstudio.microsoft.com/zh-hans/older-releases/")
+                .download("Build Tools for Visual Studio（仅编译器）", "https://visualstudio.microsoft.com/zh-hans/downloads/#build-tools-for-visual-studio-2022")
+                .build());
+
         register(LangSpec.builder("clang", "Clang/LLVM", "编译型")
                 .probe("clang version ([\\d.]+)", "clang", "--version")
-                .exe("clang", "clang++")
+                // clang-cl 是 LLVM 的 MSVC 兼容驱动（随 LLVM 一起安装），
+                // --version 输出与 clang 相同的 "clang version x.y.z"
+                .probe("clang version ([\\d.]+)", "clang-cl", "--version")
+                .exe("clang", "clang++", "clang-cl")
                 .homeVar("LLVM_HOME")
+                .hint("Clang 可直接使用，clang-cl 用于替代 MSVC 驱动语法（/std:c++17 等）。")
                 .download("全部版本（LLVM Releases）", "https://github.com/llvm/llvm-project/releases")
                 .download("官方下载页", "https://releases.llvm.org/")
+                .build());
+
+        register(LangSpec.builder("icx", "Intel C++ (oneAPI)", "编译型")
+                // icx --version 输出形如
+                // "Intel(R) oneAPI DPC++/C++ Compiler 2024.2.1 ..."（也有旧式 icl）
+                .probe("Compiler\\s+([\\d.]{4,})", "icx", "--version")
+                .probe("Compiler\\s+([\\d.]{4,})", "icl", "/?")
+                .exe("icx", "icl")
+                .homeVar("ONEAPI_ROOT")
+                .hint("随 Intel oneAPI Base/HPC Toolkit 安装，主要面向高性能计算场景。")
+                .download("Intel oneAPI Base Toolkit", "https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html")
+                .download("Intel C++ Compiler Classic（历史版本）", "https://www.intel.com/content/www/us/en/developer/articles/tool/compilers-redistributable-libraries.html")
+                .build());
+
+        register(LangSpec.builder("tcc", "TinyCC (tcc)", "编译型")
+                .probe("tcc version ([\\d.]+)", "tcc", "-v")
+                .exe("tcc")
+                .hint("超小型 C 编译器，常用于学习与脚本场景，非完整工具链。")
+                .download("官方镜像（各版本）", "https://download.savannah.gnu.org/releases/tinycc/")
                 .build());
 
         register(LangSpec.builder("go", "Go", "编译型")
@@ -417,9 +480,38 @@ public final class LangSpec {
                         Arrays.asList("dotnet", "list", "package"), false, "*.csproj"))
                 .multiVersion(true)
                 .hint("多 SDK 版本共存，可用 global.json 按项目锁定 SDK 版本；"
-                        + "SDK 不能靠改环境变量切换。运行时版本由宿主自动选择。")
+                        + "SDK 不能靠改环境变量切换。运行时版本由宿主自动选择。"
+                        + "仅装 .NET Framework（传统 C# 编译器 csc.exe）时请看独立的 C# 条目。")
                 .download("官方下载页（SDK 与运行时，各版本）", "https://dotnet.microsoft.com/zh-cn/download/dotnet")
-                .download("全部历史版本", "https://dotnet.microsoft.com/zh-cn/download/dotnet/6.0")
+                .build());
+
+        register(LangSpec.builder("csharp", "C# (.NET Framework / Roslyn)", "编译型")
+                // csc 不带参数会打印用法说明且常以非 0 退出，不能作为版本探测；
+                // /? 的横幅带真实版本号（"Visual C# Compiler version 4.8.x"）。
+                // PATH 命中失败也不影响判断——Scanner.discoverCsharp() 会扫描
+                // .NET Framework 目录与 VS 的 Roslyn 目录兜底。
+                .probe("Compiler version\\s+([\\d.]+)", "csc", "/?")
+                .exe("csc")
+                .envSwitchable(false)
+                .hint("传统 .NET Framework 自带 csc.exe（C:\\Windows\\Microsoft.NET\\...），"
+                        + "Visual Studio 还带 Roslyn 编译器；两者都不在 PATH 也能被发现。"
+                        + "新式 .NET（dotnet CLI）见独立的 .NET SDK 条目。")
+                .download(".NET Framework 下载页", "https://dotnet.microsoft.com/zh-cn/download/dotnet-framework")
+                .download(".NET Framework 各历史版本", "https://dotnet.microsoft.com/zh-cn/download/dotnet-framework/net48")
+                .build());
+
+        register(LangSpec.builder("mono", "Mono (C# 跨平台)", "编译型")
+                .probe("Mono JIT compiler version ([\\d.]+[\\w.\\-]*)", "mono", "--version")
+                .probe("compiler version ([\\d.]+)", "mcs", "--version")
+                .exe("mono", "mcs")
+                .homeVar("MONO_HOME", "MONO_PATH")
+                .pkg(new PkgManager("nuget", "NuGet",
+                        Arrays.asList("msbuild", "-version"), null,
+                        null, false, "*.csproj"))
+                .hint("跨平台开源 .NET 实现，自带 mcs/csc 编译器；Windows 上较少见，"
+                        + "多与 Xamarin/旧版跨平台项目并存。新项目建议用 .NET SDK。")
+                .download("Mono 官方下载页", "https://www.mono-project.com/download/stable/")
+                .download("全部历史版本（GitHub Releases）", "https://github.com/mono/mono/releases")
                 .build());
 
         register(LangSpec.builder("typescript", "TypeScript", "编译型")

@@ -117,9 +117,20 @@ public final class Json {
             return null;
         }
         char c = src.charAt(pos);
+        // 深度保护：递归下降解析遇到恶意/畸形的深嵌套（如几万个 '['）会
+        // StackOverflowError。它是 Error 不是 RuntimeException，parse() 的
+        // catch 拦不住，会直接把调用线程打挂——所以在这里主动限制层数。
+        if (c == '{' || c == '[') {
+            if (++depth > MAX_DEPTH) {
+                throw new IllegalStateException("JSON 嵌套过深（>" + MAX_DEPTH + " 层）");
+            }
+            try {
+                return c == '{' ? readObject() : readArray();
+            } finally {
+                depth--;
+            }
+        }
         switch (c) {
-            case '{': return readObject();
-            case '[': return readArray();
             case '"': return readString();
             case 't': expect("true"); return Boolean.TRUE;
             case 'f': expect("false"); return Boolean.FALSE;
@@ -127,6 +138,11 @@ public final class Json {
             default:  return readNumber();
         }
     }
+
+    /** 当前递归深度，用于防止深嵌套导致栈溢出。 */
+    private int depth;
+    /** 允许的最大嵌套层数：真实包管理器的 JSON 远达不到这个量级。 */
+    private static final int MAX_DEPTH = 64;
 
     private void expect(String lit) {
         if (src.startsWith(lit, pos)) {

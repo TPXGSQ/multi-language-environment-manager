@@ -217,6 +217,10 @@ public final class Scanner {
                 }
                 Proc.Result pr = runCached(cmd, CMD_TIMEOUT);
                 String out = pr.effective();
+                // 版本解析用 stdout+stderr 合并文本：有些工具把横幅打在 stderr、
+                // 其余打在 stdout（如 cl /?——横幅在 stderr，帮助在 stdout），
+                // 只取 effective() 会在这种"两边都有内容"的情况下漏掉版本横幅。
+                String combined = pr.stdout + "\n" + pr.stderr;
                 if (pr.timedOut || pr.error != null) {
                     result.notes.add(String.join(" ", cmd) + " → " + (pr.error != null ? pr.error : "超时"));
                     continue;
@@ -229,8 +233,8 @@ public final class Scanner {
                             + "（" + Proc.firstLine(out) + "）");
                     continue;
                 }
-                String ver = probe.extract(out);
-                if (ver != null && !ver.isEmpty() && !ver.equals(out)) {
+                String ver = probe.extract(combined);
+                if (ver != null && !ver.isEmpty() && !ver.equals(combined)) {
                     Detected.Install inst = new Detected.Install();
                     inst.version = ver;
                     inst.exePath = pathExe;
@@ -268,6 +272,15 @@ public final class Scanner {
                 result.installed = true;
                 result.notes.add("可执行文件存在，但版本命令未返回可解析的输出。");
             }
+        }
+
+        // ---- 2a-2. 环境变量不可选版本的语言：PATH 命中也不构成"可切换" ----
+        // MSVC/C# 这类语言的版本由安装器管理（见 LangSpec.envSwitchable）。
+        // "一键加入 PATH"修复后命令能被调用了，但那只解决"找不到命令"，
+        // 不解决"选哪个版本"——若仍标记 switchable，切换页会出现一个
+        // 假装可切换的条目，且把真正需要解释的不可切换版本挤掉。
+        if (result.active != null && !spec.envSwitchable) {
+            result.active.switchable = false;
         }
 
         // ---- 2b. 转发器标注：命中 ≠ 实际使用 ----
@@ -692,6 +705,9 @@ public final class Scanner {
             case "python": return discoverPython();
             case "node":   return discoverNode();
             case "dotnet": return discoverDotnet();
+            case "csharp": return discoverCsharp();
+            case "msvc":   return discoverMsvc();
+            case "gcc":    return discoverGcc();
             case "rust":   return discoverRust();
             case "go":     return discoverGo();
             case "ruby":   return discoverRuby();
@@ -1211,12 +1227,42 @@ public final class Scanner {
 
     /* ---------------- .NET ---------------- */
 
+    /**
+     * 定位 dotnet 宿主：优先 PATH，找不到再查标准安装位置。
+     * 很多人装 .NET 时没勾"添加到 PATH"（或 PATH 被精简过），只按 which
+     * 查找会把整套运行时误判成未安装——宿主文件的落点是固定的，直接探测即可。
+     */
+    private static String resolveDotnetExe() {
+        if (!Os.isWindows()) {
+            return Proc.which("dotnet");
+        }
+        String onPath = Proc.which("dotnet");
+        if (onPath != null) {
+            return onPath;
+        }
+        List<File> candidates = new ArrayList<>();
+        String pf = System.getenv("ProgramW6432");
+        if (pf != null && !pf.trim().isEmpty()) {
+            candidates.add(new File(pf, "dotnet\\dotnet.exe"));
+        }
+        candidates.add(new File(programFiles(), "dotnet\\dotnet.exe"));
+        candidates.add(new File(programFilesX86(), "dotnet\\dotnet.exe"));
+        candidates.add(new File(Os.home(), ".dotnet\\dotnet.exe"));
+        for (File f : candidates) {
+            if (f.isFile()) {
+                return f.getAbsolutePath();
+            }
+        }
+        return null;
+    }
+
     private List<Detected.Install> discoverDotnet() {
         List<Detected.Install> out = new ArrayList<>();
-        String dotnet = Proc.which("dotnet");
+        String dotnet = resolveDotnetExe();
         if (dotnet == null) {
             return out;
         }
+        String source = Proc.which("dotnet") != null ? "dotnet --list-sdks" : "dotnet 标准安装目录";
         Proc.Result r = runCached(Arrays.asList(dotnet, "--list-sdks"), CMD_TIMEOUT);
         for (String line : r.stdout.split("\\r?\\n")) {
             Matcher m = Pattern.compile("^\\s*([\\d.]+[\\w\\-.]*)\\s*\\[(.+?)\\]\\s*$").matcher(line);
@@ -1225,7 +1271,7 @@ public final class Scanner {
                 i.version = m.group(1) + " SDK";
                 i.rootDir = m.group(2);
                 i.exePath = dotnet;
-                i.source = "dotnet --list-sdks";
+                i.source = source;
                 // SDK 版本由 global.json 决定，不能像 JDK 那样靠改环境变量切换；
                 // 而且 --list-sdks 方括号里是 ...\sdk，写成 DOTNET_ROOT 会破坏宿主定位。
                 i.switchable = false;
@@ -1243,10 +1289,324 @@ public final class Scanner {
                     i.version = rt;
                     i.rootDir = m.group(3);
                     i.exePath = dotnet;
-                    i.source = "dotnet --list-runtimes";
+                    i.source = source;
                     // 运行时由 dotnet 宿主按项目自动选择，不能通过改 HOME 变量来切换。
                     // 标记为不可切换，避免在版本切换页里给出无效甚至有害的选项。
                     i.switchable = false;
+                    out.add(i);
+                }
+            }
+        }
+        if (out.isEmpty()) {
+            // 宿主存在但 SDK/运行时一个都没枚举出来（典型：--list-* 因缺 SDK 报错退出）。
+            // 从 host\fxr 目录名兜底取宿主版本，仍要报告"已安装"，不能静默丢弃。
+            File fxr = new File(new File(dotnet).getParentFile(), "host\\fxr");
+            File[] kids = fxr.listFiles(File::isDirectory);
+            String hostVer = null;
+            if (kids != null) {
+                for (File k : kids) {
+                    if (hostVer == null || Scanner.compareVersion(k.getName(), hostVer) > 0) {
+                        hostVer = k.getName();
+                    }
+                }
+            }
+            Detected.Install i = new Detected.Install();
+            i.version = hostVer != null ? hostVer + "（仅运行时宿主）" : "已安装（版本未获取）";
+            i.rootDir = new File(dotnet).getParent();
+            i.exePath = dotnet;
+            i.source = source;
+            i.switchable = false;
+            out.add(i);
+        }
+        return out;
+    }
+
+    /* ---------------- C# (.NET Framework / Roslyn) ---------------- */
+
+    /**
+     * 传统 C# 编译器发现。
+     *
+     * <p>csc.exe 基本从不进 PATH，只按 which 查会整体漏报。来源有两类：
+     * <ol>
+     *   <li>.NET Framework 自带编译器：C:\Windows\Microsoft.NET\Framework(64)\v*\csc.exe，
+     *       版本可从横幅（"Visual C# Compiler version 4.8.x"）或目录名 v4.0.30319 取得；</li>
+     *   <li>Visual Studio 的 Roslyn 编译器：&lt;VS&gt;\MSBuild\Current\Bin\Roslyn\csc.exe，
+     *       版本形如 3.x，通常比 Framework 自带的新。</li>
+     * </ol>
+     * 两者都标记为不可切换：编译器是安装器落盘的固定文件，改环境变量不会影响哪份被用。
+     */
+    private List<Detected.Install> discoverCsharp() {
+        List<Detected.Install> out = new ArrayList<>();
+        if (!Os.isWindows()) {
+            return out;
+        }
+        // 1) .NET Framework 目录（64 位与 32 位两套）
+        String windir = System.getenv("SystemRoot");
+        if (windir == null || windir.trim().isEmpty()) {
+            windir = "C:\\Windows";
+        }
+        for (String sub : new String[]{"Microsoft.NET\\Framework64", "Microsoft.NET\\Framework"}) {
+            File base = new File(windir, sub);
+            File[] kids = base.listFiles(File::isDirectory);
+            if (kids == null) {
+                continue;
+            }
+            for (File k : kids) {
+                String dirName = k.getName().toLowerCase();
+                // 只认 v4+ 的 Framework 编译器：v2.0/v3.5 的上古 csc 报出来的
+                // 版本号是 "8.00.50727" 这种编译器内部版本，排在 4.8 前面
+                // 会被误读成 "C# 8"，徒增困惑；它们早已停止支持，不值得展示。
+                if (!dirName.matches("v(4|5|\\d{2,})\\..*")) {
+                    continue;
+                }
+                File csc = new File(k, "csc.exe");
+                if (!csc.isFile()) {
+                    continue;
+                }
+                Detected.Install i = probeExe(csc.getAbsolutePath(), "/?",
+                        "Compiler version\\s+([\\d.]+)", ".NET Framework");
+                if (i != null) {
+                    if (i.version == null || i.version.startsWith("已安装")) {
+                        // 横幅没解析出来时用目录名兜底（v4.0.30319 → 4.0.30319）
+                        String dirVer = k.getName().substring(1);
+                        if (dirVer.matches("[\\d.]+")) {
+                            i.version = dirVer;
+                            i.rawOutput = "目录名 " + k.getName();
+                        }
+                    }
+                    i.rootDir = k.getAbsolutePath();
+                    i.switchable = false;
+                    out.add(i);
+                }
+            }
+        }
+        // 2) Visual Studio 的 Roslyn 编译器
+        for (Detected.Install vs : discoverVsInstances()) {
+            File roslyn = new File(vs.rootDir, "MSBuild\\Current\\Bin\\Roslyn\\csc.exe");
+            if (!roslyn.isFile()) {
+                continue;
+            }
+            Detected.Install i = probeExe(roslyn.getAbsolutePath(), "/?",
+                    "Compiler version\\s+([\\d.]+)", "Visual Studio（Roslyn）");
+            if (i != null) {
+                i.rootDir = roslyn.getParent();
+                i.switchable = false;
+                out.add(i);
+            }
+        }
+        return out;
+    }
+
+    /* ---------------- MSVC ---------------- */
+
+    /**
+     * 用 vswhere 枚举 Visual Studio / Build Tools 实例（VS2017+ 的官方出口）。
+     * 返回的 Install 只填 rootDir（VS 实例根目录）与 source，供其它发现流程复用。
+     */
+    private List<Detected.Install> discoverVsInstances() {
+        List<Detected.Install> out = new ArrayList<>();
+        if (!Os.isWindows()) {
+            return out;
+        }
+        File vswhere = new File(programFilesX86(),
+                "Microsoft Visual Studio\\Installer\\vswhere.exe");
+        if (!vswhere.isFile()) {
+            return out;
+        }
+        Proc.Result r = runCached(Arrays.asList(vswhere.getAbsolutePath(),
+                "-all", "-products", "*", "-property", "installationPath"), CMD_TIMEOUT);
+        for (String line : r.stdout.split("\\r?\\n")) {
+            String dir = line.trim();
+            if (dir.isEmpty() || !new File(dir).isDirectory()) {
+                continue;
+            }
+            Detected.Install i = new Detected.Install();
+            i.rootDir = dir;
+            i.source = "vswhere";
+            out.add(i);
+        }
+        return out;
+    }
+
+    /**
+     * MSVC（cl.exe）发现。
+     *
+     * <p>cl 默认不在 PATH（需要 vcvars64.bat 才可见），只按 which 查必然漏报，
+     * 这正是"装了 C++ 却显示不出来"的主因。发现路径：
+     * <ol>
+     *   <li>vswhere 枚举出的每个 VS 实例，扫 VC\Tools\MSVC\&lt;版本&gt;\bin\Host*&;&lt;架构&gt;\cl.exe，
+     *       版本号直接取目录名（14.29.30133），权威且不用启动 cl；</li>
+     *   <li>按已知安装根目录兜底扫描（vswhere 缺失的旧版安装器/自定义安装）；</li>
+     *   <li>VS2015 及更早的布局 VC\bin\cl.exe，版本从横幅解析。</li>
+     * </ol>
+     */
+    private List<Detected.Install> discoverMsvc() {
+        List<Detected.Install> out = new ArrayList<>();
+        if (!Os.isWindows()) {
+            return out;
+        }
+        Set<String> seenCl = new LinkedHashSet<>();
+
+        // 1) vswhere 枚举的实例 + 2) 已知安装根目录兜底，统一走同一套扫描
+        List<File> vsRoots = new ArrayList<>();
+        for (Detected.Install vs : discoverVsInstances()) {
+            if (vs.rootDir != null) {
+                vsRoots.add(new File(vs.rootDir));
+            }
+        }
+        File vsBaseX86 = new File(programFilesX86(), "Microsoft Visual Studio");
+        File vsBaseX64 = new File(programFiles(), "Microsoft Visual Studio");
+        for (File base : new File[]{vsBaseX86, vsBaseX64}) {
+            File[] years = base.listFiles(File::isDirectory);
+            if (years == null) {
+                continue;
+            }
+            for (File year : years) {
+                File[] editions = year.listFiles(File::isDirectory);
+                if (editions == null) {
+                    continue;
+                }
+                for (File ed : editions) {
+                    if (!vsRoots.contains(ed)) {
+                        vsRoots.add(ed);
+                    }
+                }
+            }
+        }
+
+        for (File vs : vsRoots) {
+            // VS2017+ 布局：VC\Tools\MSVC\<ver>\bin\Hostx64\x64\cl.exe
+            File msvcRoot = new File(vs, "VC\\Tools\\MSVC");
+            File[] versions = msvcRoot.listFiles(File::isDirectory);
+            if (versions != null) {
+                for (File v : versions) {
+                    if (!v.getName().matches("\\d+\\.\\d+.*")) {
+                        continue;
+                    }
+                    File bin = new File(v, "bin");
+                    File[] hosts = bin.listFiles(File::isDirectory);
+                    if (hosts == null) {
+                        continue;
+                    }
+                    // 优先 Hostx64\x64，其次任意 Host*/x64，再退到任意组合
+                    File chosen = pickHostCl(hosts);
+                    if (chosen == null) {
+                        continue;
+                    }
+                    if (seenCl.add(chosen.getAbsolutePath().toLowerCase())) {
+                        Detected.Install i = new Detected.Install();
+                        i.version = v.getName() + "（工具集）";
+                        i.exePath = chosen.getAbsolutePath();
+                        i.rootDir = v.getAbsolutePath();
+                        i.source = "Visual Studio";
+                        // MSVC 工具集是 VS 安装器管理的固定目录，改环境变量切不了版本
+                        i.switchable = false;
+                        i.rawOutput = "VS 实例：" + vs.getAbsolutePath();
+                        out.add(i);
+                    }
+                }
+            }
+            // VS2015 及更早：VC\bin\cl.exe，版本只能从横幅解析
+            File oldCl = new File(vs, "VC\\bin\\cl.exe");
+            if (oldCl.isFile() && seenCl.add(oldCl.getAbsolutePath().toLowerCase())) {
+                Detected.Install i = probeExe(oldCl.getAbsolutePath(), "/?",
+                        "C/C\\+\\+.{0,60}?(\\d+\\.\\d+\\.\\d+)", "Visual Studio（旧版布局）");
+                if (i != null) {
+                    i.rootDir = oldCl.getParent();
+                    i.switchable = false;
+                    out.add(i);
+                }
+            }
+        }
+        return out;
+    }
+
+    /** 在 VC\Tools\MSVC\<ver>\bin 下的 Host* 目录里挑最合适的 cl.exe。 */
+    private static File pickHostCl(File[] hosts) {
+        File fallback = null;
+        for (File h : hosts) {
+            String hn = h.getName().toLowerCase();
+            File x64 = new File(h, "x64\\cl.exe");
+            if (x64.isFile()) {
+                if (hn.equals("hostx64")) {
+                    return x64;
+                }
+                if (fallback == null) {
+                    fallback = x64;
+                }
+            }
+            if (fallback == null) {
+                File any = new File(h, "x86\\cl.exe");
+                if (any.isFile()) {
+                    fallback = any;
+                }
+            }
+        }
+        return fallback;
+    }
+
+    /* ---------------- GCC (MinGW 系目录兜底) ---------------- */
+
+    /**
+     * MinGW 系 GCC 发现。
+     *
+     * <p>GCC 装完不进 PATH 的情形很多（解压版 MinGW-w64、MSYS2 未做 profile 链接、
+     * 绿色版 TDM-GCC），只按 which 查会漏。这里扫已知的常见落点，
+     * 版本仍由 gcc/g++ 自己报告，不做任何猜测。
+     */
+    private List<Detected.Install> discoverGcc() {
+        if (!Os.isWindows()) {
+            return new ArrayList<>();
+        }
+        List<Detected.Install> out = new ArrayList<>();
+        String[] regexes = {"gcc\\s.*?\\b(\\d+\\.\\d+(?:\\.\\d+)?)", "\\(GCC\\)\\s+(\\d+(?:\\.\\d+)+)"};
+        String[][] targets = {
+                {"C:\\mingw64\\bin", "gcc.exe"},
+                {"C:\\MinGW\\bin", "gcc.exe"},
+                {"C:\\msys64\\mingw64\\bin", "gcc.exe"},
+                {"C:\\msys64\\ucrt64\\bin", "gcc.exe"},
+                {"C:\\msys64\\clang64\\bin", "gcc.exe"},
+                {"C:\\TDM-GCC-64\\bin", "gcc.exe"},
+                {"C:\\Program Files\\mingw-w64", "*\\mingw64\\bin\\gcc.exe"},
+                {"C:\\Program Files (x86)\\mingw-w64", "*\\mingw64\\bin\\gcc.exe"},
+                {"D:\\mingw64\\bin", "gcc.exe"},
+                {"D:\\msys64\\mingw64\\bin", "gcc.exe"},
+                {"D:\\TDM-GCC-64\\bin", "gcc.exe"},
+        };
+        for (String[] t : targets) {
+            File dir = new File(t[0]);
+            if (!dir.isDirectory()) {
+                continue;
+            }
+            List<File> exeFiles = new ArrayList<>();
+            if (t[1].contains("*")) {
+                // 嵌套通配：mingw-w64\<full-ver>\mingw64\bin\gcc.exe
+                File[] kits = dir.listFiles(File::isDirectory);
+                if (kits != null) {
+                    for (File k : kits) {
+                        File e = new File(k, t[1].replaceFirst("^[^\\\\]+\\\\", ""));
+                        if (e.isFile()) {
+                            exeFiles.add(e);
+                        }
+                    }
+                }
+            } else {
+                File e = new File(dir, t[1]);
+                if (e.isFile()) {
+                    exeFiles.add(e);
+                }
+            }
+            for (File e : exeFiles) {
+                Detected.Install i = null;
+                for (String rx : regexes) {
+                    i = probeExe(e.getAbsolutePath(), "--version", rx, "MinGW 目录");
+                    if (i != null && i.version != null && !i.version.startsWith("已安装")) {
+                        break;
+                    }
+                }
+                if (i != null) {
+                    i.rootDir = e.getParentFile() == null ? null : e.getParentFile().getParentFile() == null
+                            ? null : e.getParentFile().getParentFile().getAbsolutePath();
                     out.add(i);
                 }
             }
@@ -1455,7 +1815,10 @@ public final class Scanner {
         i.source = source;
 
         Proc.Result r = runCached(Arrays.asList(exePath, arg), CMD_TIMEOUT);
+        // 与 scanOne 一致：用 stdout+stderr 合并文本做版本解析，
+        // 避免横幅在 stderr、正文在 stdout 的工具（如 cl /?）解析落空
         String out = r.effective();
+        String combined = r.stdout + "\n" + r.stderr;
         if (r.timedOut || r.error != null) {
             // 文件存在但命令跑不起来：仍报告“已安装”，不要给出“未安装”的错误结论
             i.version = "已安装（版本探测失败）";
@@ -1463,13 +1826,13 @@ public final class Scanner {
             return i;
         }
         String ver = null;
-        if (!out.isEmpty()) {
-            Matcher m = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(out);
+        if (!combined.trim().isEmpty()) {
+            Matcher m = Pattern.compile(regex, Pattern.CASE_INSENSITIVE).matcher(combined);
             if (m.find()) {
                 ver = m.group(1).trim();
             }
             if (ver == null) {
-                Matcher m2 = Pattern.compile("(\\d+\\.\\d+[\\w.\\-+]*)").matcher(out);
+                Matcher m2 = Pattern.compile("(\\d+\\.\\d+[\\w.\\-+]*)").matcher(combined);
                 ver = m2.find() ? m2.group(1) : null;
             }
         }

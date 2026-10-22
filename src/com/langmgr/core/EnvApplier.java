@@ -1044,6 +1044,13 @@ public final class EnvApplier {
         if (low.contains("dotnet")) {
             return ".NET";
         }
+        if (low.contains("microsoft visual studio") || low.contains("\\vc\\bin")
+                || low.contains("vc\\tools\\msvc") || low.contains("msvc")) {
+            return "MSVC / Visual Studio";
+        }
+        if (low.contains("microsoft.net") || low.contains("msbuild") || low.contains("roslyn")) {
+            return "C# / .NET Framework";
+        }
         if (low.contains("maven")) {
             return "Maven";
         }

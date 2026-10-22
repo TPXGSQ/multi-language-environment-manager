@@ -140,6 +140,8 @@ public class EnvPanel extends JPanel {
 
     private void configureTable(JTable t) {
         t.setFont(Theme.F_SMALL);
+        // 只读展示：即便将来换了可编辑的模型，双击也不会进入"假编辑"
+        Theme.readOnly(t);
         t.setRowHeight(25);
         t.setShowGrid(false);
         t.setIntercellSpacing(new Dimension(0, 0));
@@ -164,6 +166,12 @@ public class EnvPanel extends JPanel {
                     c.setForeground(Theme.TABLE_CELL_FG);
                 }
                 setBorder(BorderFactory.createEmptyBorder(0, 8, 0, 8));
+                // 单元格内容被列宽截断时，悬停给出完整文字（长文本限宽换行）
+                String text = value == null ? "" : String.valueOf(value);
+                int avail = table.getColumnModel().getColumn(column).getWidth() - 16;
+                boolean clipped = avail > 0
+                        && getFontMetrics(getFont()).stringWidth(text) > avail;
+                setToolTipText(clipped ? Theme.wrapTip(text, avail) : null);
                 return c;
             }
         });
@@ -501,6 +509,9 @@ public class EnvPanel extends JPanel {
                 } else {
                     setHorizontalAlignment(SwingConstants.LEFT);
                 }
+                // 此表自带渲染器，未走 Theme.centerCells：长 PATH 条目被截断时
+                // 悬停也要能看到全文（与其它表保持一致）
+                setToolTipText(Theme.cellTooltip(this, table, column));
                 return c;
             }
         });

@@ -195,7 +195,7 @@ public class DependencyPanel extends JPanel {
         bar.setOpaque(false);
         bar.add(Theme.label("语言"));
         final JComboBox<String> cs = new JComboBox<>(new String[]{
-                "python", "node", "java", "go", "rust", "dotnet", "ruby", "php"});
+                "python", "node", "java", "go", "rust", "dotnet", "csharp", "msvc", "ruby", "php"});
         cs.setPreferredSize(new Dimension(140, 30));
         cs.setFont(Theme.F_SMALL);
         cs.setBackground(Color.WHITE);
@@ -263,6 +263,8 @@ public class DependencyPanel extends JPanel {
 
     private void configureTable(JTable t, boolean withInstallMenu) {
         t.setFont(Theme.F_SMALL);
+        // 只读展示：双击不进入"假编辑"
+        Theme.readOnly(t);
         t.setRowHeight(25);
         t.setShowGrid(false);
         t.setIntercellSpacing(new Dimension(0, 0));
@@ -294,6 +296,12 @@ public class DependencyPanel extends JPanel {
                 if (column == 4 && "dev".equalsIgnoreCase(String.valueOf(value))) {
                     c.setForeground(Theme.WARN);
                 }
+                // 单元格内容被列宽截断时，悬停给出完整文字（长文本限宽换行）
+                String text = value == null ? "" : String.valueOf(value);
+                int avail = table.getColumnModel().getColumn(column).getWidth() - 16;
+                boolean clipped = avail > 0
+                        && getFontMetrics(getFont()).stringWidth(text) > avail;
+                setToolTipText(clipped ? Theme.wrapTip(text, avail) : null);
                 return c;
             }
         });
