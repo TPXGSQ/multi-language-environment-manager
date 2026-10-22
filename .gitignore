@@ -1,0 +1,5 @@
+out/
+backup/
+reports/
+sources.txt
+*.class
